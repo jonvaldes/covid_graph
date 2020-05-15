@@ -159,28 +159,36 @@ fn population_map() -> std::collections::HashMap<String, u32> {
         "Norway" => 5_295_619
         "Sweden" => 10_090_825
         "Spain" => 46_752_408
-        "Italy" => 60_461_826
-        "France" => 65_255_227
+        //"Italy" => 60_461_826
+        //"France" => 65_255_227
         "Germany" => 83_749_987
         "Belgium" => 11_583_221
         "Finland" => 5_539_631
-        "Austria" => 8_999_865
-        "Netherlands" => 17_130_073
-        "Switzerland" =>  8_646_561
+        // "Austria" => 8_999_865
+        // "Netherlands" => 17_130_073
+        //"Switzerland" =>  8_646_561
         "United Kingdom" => 67_886_011
         "Ireland" => 4_937_786
-        "Denmark" => 5_775_666
+        //"Denmark" => 5_775_666
+        "Japan" => 126_476_461
+        "Taiwan" => 23_816_775
     }
+}
+
+fn months_to_hours(months: i32) -> f32 {
+    (24 * 30 * months) as f32
 }
 
 fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
 
     use plotters::prelude::*;
 
-    let root_area = BitMapBackend::new("total.png", (1024, 1024)).into_drawing_area();
+    let root_area = BitMapBackend::new("total.png", (1920, 1024)).into_drawing_area();
     root_area.fill(&WHITE)?;
 
     let (upper, lower) = root_area.split_vertically(512);
+    let (top_left, top_right) = upper.split_horizontally(960);
+    let (bottom_left, bottom_right) = lower.split_horizontally(960);
 
     macro_rules! setup_chart {
         ($name: expr, $area: ident, $vert_max: expr) => {
@@ -190,7 +198,9 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
                 .margin(5)
                 .set_all_label_area_size(50)
                 .caption($name, ("sans-serif", 40).into_font())
-                .build_ranged(0.0..(24*5*30) as f32, 0.0 ..$vert_max as f32).unwrap();
+                .build_ranged(
+                    months_to_hours(1)..months_to_hours(4), 
+                    0f32..$vert_max as f32).unwrap();
 
             cc.configure_mesh()
                 .x_labels(20)
@@ -209,7 +219,7 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
     let countries = population_map.keys().cloned().collect::<Vec<String>>();
     // Draw total death count graph
     {
-        let mut cc = setup_chart!("Total Deaths", upper, 40_000.0);
+        let mut cc = setup_chart!("Total Deaths", top_left, 40_000.0);
 
         for (index, country) in regions
             .iter()
@@ -227,17 +237,49 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
                 }),
                 &GraphPalette::pick(index),
             ))?
+                .label(format!("{} - Current deaths: {}", country.name, country.evolution[country.evolution.len()-1].deaths))
+                .legend(move |(x, y)| {
+                    PathElement::new(vec![(x, y), (x + 20, y)], &GraphPalette::pick(index))
+                });
+        }
+        cc.configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperLeft)
+            .border_style(&BLACK).draw()?;
+    }
+
+    {
+        let mut cc = setup_chart!("Total daily Deaths", top_right, 4_000.0);
+
+        for (index, country) in regions
+            .iter()
+            .filter(|x| countries.contains(&x.name))
+            .enumerate()
+        {
+            let t0 = Utc.ymd(2020, 1, 22).and_hms(0, 0, 0);
+
+            cc.draw_series(LineSeries::new(
+                country.evolution.iter().enumerate().skip(1).map(|(index, point)| {
+                    let prev_point = &country.evolution[index-1];
+                    (
+                        point.update_time.signed_duration_since(t0).num_hours() as f32,
+                        (point.deaths  - prev_point.deaths) as f32,
+                    )
+                }),
+                &GraphPalette::pick(index),
+            ))?
                 .label(country.name.clone())
                 .legend(move |(x, y)| {
                     PathElement::new(vec![(x, y), (x + 20, y)], &GraphPalette::pick(index))
                 });
         }
-        cc.configure_series_labels().border_style(&BLACK).draw()?;
+        cc.configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperLeft)
+            .border_style(&BLACK).draw()?;
     }
 
     // Draw deaths per 100K people graph
     {
-        let mut cc = setup_chart!("Deaths per 100K", lower, 80.0);
+        let mut cc = setup_chart!("Deaths per 100K", bottom_left, 80.0);
 
         for (index, country) in regions
             .iter()
@@ -263,7 +305,50 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
                     PathElement::new(vec![(x, y), (x + 20, y)], &GraphPalette::pick(index))
                 });
         }
-        cc.configure_series_labels().border_style(&BLACK).draw()?;
+        cc.configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperLeft)
+            .border_style(&BLACK).draw()?;
+    }
+
+    {
+        let mut cc = setup_chart!("Averaged (3 day) Daily Deaths per 100K", bottom_right, 7.0);
+
+        for (index, country) in regions
+            .iter()
+            .filter(|x| countries.contains(&x.name))
+            .enumerate()
+        {
+            let t0 = Utc.ymd(2020, 1, 22).and_hms(0, 0, 0);
+            
+            let population_over100k = population_map.get(&country.name).cloned().unwrap() as f32 /
+                100_000 as f32;
+
+            cc.draw_series(LineSeries::new(
+                country.evolution.iter().enumerate().skip(3).map(|(index, point)| {
+                    let prev_1_point = &country.evolution[index-1];
+                    let prev_2_point = &country.evolution[index-2];
+                    let prev_3_point = &country.evolution[index-3];
+
+                    let count = point.deaths - prev_1_point.deaths;
+                    let prev_1_count = prev_1_point.deaths - prev_2_point.deaths;
+                    let prev_2_count = prev_2_point.deaths - prev_3_point.deaths;
+
+                    (
+                        point.update_time.signed_duration_since(t0).num_hours() as f32,
+                        ((count + prev_1_count + prev_2_count) / 3) as f32 / population_over100k,
+                    )
+                }),
+                &GraphPalette::pick(index),
+            ))?
+                .label(country.name.clone())
+                .legend(move |(x, y)| {
+                    PathElement::new(vec![(x, y), (x + 20, y)], &GraphPalette::pick(index))
+                });
+        }
+
+        cc.configure_series_labels()
+            .position(plotters::chart::SeriesLabelPosition::UpperLeft)
+            .border_style(&BLACK).draw()?;
     }
 
     Ok(())
