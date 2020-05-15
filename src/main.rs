@@ -18,7 +18,7 @@ impl plotters::prelude::Palette for GraphPalette {
         (0, 128, 128),
         (230, 190, 255),
         (170, 110, 40),
-        (255, 250, 200),
+        (155, 250, 200),
         (128, 0, 0),
         (170, 255, 195),
         (128, 128, 0),
@@ -167,23 +167,13 @@ fn population_map() -> std::collections::HashMap<String, u32> {
         "Austria" => 8_999_865
         "Netherlands" => 17_130_073
         "Switzerland" =>  8_646_561
+        "United Kingdom" => 67_886_011
+        "Ireland" => 4_937_786
+        "Denmark" => 5_775_666
     }
 }
 
 fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
-    let interesting_countries = &[
-        "Spain",
-        "Sweden",
-        "Norway",
-        "Italy",
-        "France",
-        "Germany",
-        "Belgium",
-        "Finland",
-        "Austria",
-        "Netherlands",
-        "Switzerland",
-    ];
 
     use plotters::prelude::*;
 
@@ -193,13 +183,13 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
     let (upper, lower) = root_area.split_vertically(512);
 
     macro_rules! setup_chart {
-        ($area: ident, $vert_max: expr) => {
+        ($name: expr, $area: ident, $vert_max: expr) => {
 
             {
             let mut cc = ChartBuilder::on(&$area)
                 .margin(5)
                 .set_all_label_area_size(50)
-                .caption("Total deaths", ("sans-serif", 40).into_font())
+                .caption($name, ("sans-serif", 40).into_font())
                 .build_ranged(0.0..(24*5*30) as f32, 0.0 ..$vert_max as f32).unwrap();
 
             cc.configure_mesh()
@@ -213,14 +203,17 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
             }
         }
     }
+        
+    let population_map = population_map();
 
+    let countries = population_map.keys().cloned().collect::<Vec<String>>();
     // Draw total death count graph
     {
-        let mut cc = setup_chart!(upper, 40_000.0);
+        let mut cc = setup_chart!("Total Deaths", upper, 40_000.0);
 
         for (index, country) in regions
             .iter()
-            .filter(|x| interesting_countries.contains(&x.name.as_str()))
+            .filter(|x| countries.contains(&x.name))
             .enumerate()
         {
             let t0 = Utc.ymd(2020, 1, 22).and_hms(0, 0, 0);
@@ -244,13 +237,11 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
 
     // Draw deaths per 100K people graph
     {
-        let population_map = population_map();
-
-        let mut cc = setup_chart!(lower, 80.0);
+        let mut cc = setup_chart!("Deaths per 100K", lower, 80.0);
 
         for (index, country) in regions
             .iter()
-            .filter(|x| interesting_countries.contains(&x.name.as_str()))
+            .filter(|x| countries.contains(&x.name))
             .enumerate()
         {
             let t0 = Utc.ymd(2020, 1, 22).and_hms(0, 0, 0);
