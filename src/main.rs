@@ -1,4 +1,7 @@
-use chrono::prelude::*;
+// TODO - Check this data source: https://opendata.ecdc.europa.eu/covid19/casedistribution/json/
+use std::collections::HashMap;
+
+use serde::Deserialize;
 use anyhow::Result;
 
 pub struct GraphPalette;
@@ -29,157 +32,88 @@ impl plotters::prelude::Palette for GraphPalette {
     ];
 }
 
-#[derive(Debug)]
-struct DataPoint {
-    name: String,
-    region: String,
-    last_update: chrono::DateTime<Utc>,
-    confirmed: u32,
-    deaths: u32,
-    recovered: u32,
+
+#[derive(Debug, Clone)]
+struct Record {
+    day: i32, // Days since January 1st 2020
+    cases: i32,
+    deaths: i32,
 }
 
-fn get_covid_data() -> Result<Vec<DataPoint>> {
+#[derive(Debug, Clone)]
+struct CountryData {
+    country_name: String,
+    records: Vec<Record>,
+    population_2018: i32,
+}
 
-    let url = "https://nssac.bii.virginia.edu/covid-19/dashboard/data/nssac-ncov-data-country-state.zip";
+fn get_covid_data_json() -> Result<Vec<CountryData>> {
 
-    let bytes = reqwest::blocking::get(url)?.bytes()?;
+    #[derive(Deserialize)]
+    struct JsonData {
+        records: Vec<JsonDataPoint>,
+    }
 
-    let byte_slice = bytes.slice(..);
-    let mut data_cursor = std::io::Cursor::new(byte_slice);
-    let mut zip_data = zip::read::ZipArchive::new(&mut data_cursor)?;
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct JsonDataPoint {
+        date_rep: String,
+        day: String,
+        month: String,
+        year: String,
+        cases: String,
+        deaths: String,
+        countries_and_territories: String,
+        geo_id: String,
+        countryterritory_code: String,
+        pop_data_2018: String,
+        continent_exp: String,
+    }
 
-    let file_count = zip_data.len();
 
-    let mut result = vec![];
 
-    for index in 0..file_count {
-        let file = zip_data.by_index(index)?;
-        let filename = String::from(file.name());
-        if filename.contains("README") {
+    let url = "https://opendata.ecdc.europa.eu/covid19/casedistribution/json/";
+    let json_data : JsonData = reqwest::blocking::get(url)?.json()?;
+
+    let mut country_map : HashMap<String, CountryData> = HashMap::new();
+
+    let first_day_of_month = [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 336];
+
+    for json_record in json_data.records {
+
+        if json_record.year != "2020" {
             continue;
         }
 
-        let reader = std::io::BufReader::new(file);
-        let mut csv_reader = csv::ReaderBuilder::new()
-            .flexible(true)
-            .terminator(csv::Terminator::Any('\n' as u8))
-            .from_reader(reader);
-
-        let mut parse_file = || -> Result<()> {
-            for record in csv_reader.records() {
-                let record = record?;
-                if record.len() != 6 {
-                    println!("Record of wrong length: {:?}", record);
-                    continue;
-                }
-                let data_point = DataPoint {
-                    name: String::from(&record[0]),
-                    region: String::from(&record[1]),
-                    last_update: Utc.datetime_from_str(&record[2], "%Y-%m-%d %H:%M:%S")?,
-                    confirmed: record[3].parse()?,
-                    deaths: record[4].parse()?,
-                    recovered: record[5].parse()?,
-                };
-
-                result.push(data_point);
-            }
-            Ok(())
+        let record = Record {
+            day: json_record.day.parse::<i32>()? + first_day_of_month[json_record.month.parse::<usize>()?],
+            cases: json_record.cases.parse()?,
+            deaths: json_record.deaths.parse()?,
         };
 
-        if let Err(err) = parse_file() {
-            println!("Error parsing file {}: {}", filename, err);
-        }
-    }
 
-    Ok(result)
-}
-
-
-#[derive(Clone)]
-struct EvolutionPoint {
-    update_time: chrono::DateTime<Utc>,
-    confirmed: u32,
-    deaths: u32,
-    recovered: u32,
-}
-
-#[derive(Clone)]
-struct RegionData {
-    name: String,
-    region: String,
-    evolution: Vec<EvolutionPoint>,
-}
-
-fn get_per_country_data() -> Result<Vec<RegionData>> {
-
-    use std::collections::HashMap;
-    let mut hash: HashMap<String, RegionData> = HashMap::new();
-
-    for data_point in get_covid_data()? {
-        let evolution_point = EvolutionPoint {
-            update_time: data_point.last_update,
-            confirmed: data_point.confirmed,
-            deaths: data_point.deaths,
-            recovered: data_point.recovered,
-        };
-
-        if let Some(value) = hash.get_mut(&data_point.name) {
-            value.evolution.push(evolution_point);
+        if let Some(value) = country_map.get_mut(&json_record.countries_and_territories) {
+            value.records.push(record);
         } else {
-            hash.insert(
-                data_point.name.clone(),
-                RegionData {
-                    name: data_point.name,
-                    region: data_point.region,
-                    evolution: vec![evolution_point],
-                },
-            );
+            country_map.insert(json_record.countries_and_territories.clone(), 
+                CountryData{
+                    country_name: json_record.countries_and_territories.replace("_"," "),
+                    records: vec!(record),
+                    population_2018: json_record.pop_data_2018.parse().unwrap_or(0),
+                });
         }
     }
 
-    Ok(hash.values().cloned().collect())
+    Ok(country_map.values().cloned().collect())
 }
 
-fn population_map() -> std::collections::HashMap<String, u32> {
+fn averaged_daily_deaths(records: &[Record], current_day: usize, avg_days: usize) -> f32 {
 
-    macro_rules! map(
-    { $($key:expr => $value:expr)+ } => {
-        {
-            let mut m = ::std::collections::HashMap::new();
-            $(
-                m.insert(String::from($key), $value);
-            )+
-            m
-        }
-     };
-    );
-
-    map!{
-        "Norway" => 5_295_619
-        "Sweden" => 10_090_825
-        "Spain" => 46_752_408
-        //"Italy" => 60_461_826
-        //"France" => 65_255_227
-        "Germany" => 83_749_987
-        "Belgium" => 11_583_221
-        "Finland" => 5_539_631
-        // "Austria" => 8_999_865
-        // "Netherlands" => 17_130_073
-        //"Switzerland" =>  8_646_561
-        "United Kingdom" => 67_886_011
-        "Ireland" => 4_937_786
-        //"Denmark" => 5_775_666
-        "Japan" => 126_476_461
-        "Taiwan" => 23_816_775
-    }
+    let total_counts : i32 = records.iter().skip(current_day - avg_days).take(avg_days).map(|record| record.deaths).sum();
+    total_counts as f32 / avg_days as f32
 }
 
-fn months_to_hours(months: i32) -> f32 {
-    (24 * 30 * months) as f32
-}
-
-fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
+fn draw_evolution_graph(regions: &Vec<CountryData>) -> Result<()> {
 
     use plotters::prelude::*;
 
@@ -199,45 +133,45 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
                 .set_all_label_area_size(50)
                 .caption($name, ("sans-serif", 40).into_font())
                 .build_ranged(
-                    months_to_hours(1)..months_to_hours(4), 
+                    (30f32 * 3f32)..(30f32*6f32),
                     0f32..$vert_max as f32).unwrap();
 
             cc.configure_mesh()
                 .x_labels(20)
                 .y_labels(10)
                 .disable_mesh()
-                .x_label_formatter(&|v| format!("{:.0}", v/24.0))
+                .x_label_formatter(&|v| format!("{:.0}", v))
                 .y_label_formatter(&|v| format!("{:.1}", v))
                 .draw().unwrap();
             cc
             }
         }
     }
+    let average_days = 7;
         
-    let population_map = population_map();
-
-    let countries = population_map.keys().cloned().collect::<Vec<String>>();
+    let countries = &["Spain", "Sweden", "Belgium", "United Kingdom", "Germany", "Brazil", "United States of America"];
     // Draw total death count graph
     {
-        let mut cc = setup_chart!("Total Deaths", top_left, 40_000.0);
+        let mut cc = setup_chart!("Total Deaths", top_left, 100_000.0);
 
         for (index, country) in regions
             .iter()
-            .filter(|x| countries.contains(&x.name))
+            .filter(|x| countries.contains(&x.country_name.as_str()))
             .enumerate()
         {
-            let t0 = Utc.ymd(2020, 1, 22).and_hms(0, 0, 0);
 
-            cc.draw_series(LineSeries::new(
-                country.evolution.iter().map(|point| {
-                    (
-                        point.update_time.signed_duration_since(t0).num_hours() as f32,
-                        point.deaths as f32,
-                    )
-                }),
-                &GraphPalette::pick(index),
-            ))?
-                .label(format!("{} - Current deaths: {}", country.name, country.evolution[country.evolution.len()-1].deaths))
+            let (accum_deaths, death_sum) = {
+                let mut running_sum = 0;
+                let mut deaths = vec!();
+                for record in country.records.iter().rev() {
+                    running_sum += record.deaths;
+                    deaths.push( (record.day as f32, running_sum as f32));
+                }
+                (deaths, running_sum)
+            };
+
+            cc.draw_series(LineSeries::new(accum_deaths, &GraphPalette::pick(index)))?
+                .label(format!("{} - Current deaths: {}", country.country_name, death_sum))
                 .legend(move |(x, y)| {
                     PathElement::new(vec![(x, y), (x + 20, y)], &GraphPalette::pick(index))
                 });
@@ -246,28 +180,24 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
             .position(plotters::chart::SeriesLabelPosition::UpperLeft)
             .border_style(&BLACK).draw()?;
     }
-
+    
+    // Draw daily deaths
     {
-        let mut cc = setup_chart!("Total daily Deaths", top_right, 4_000.0);
+        let mut cc = setup_chart!(format!("Total daily Deaths Averaged over {} days", average_days), top_right, 3_000.0);
 
         for (index, country) in regions
             .iter()
-            .filter(|x| countries.contains(&x.name))
+            .filter(|x| countries.contains(&x.country_name.as_str()))
             .enumerate()
         {
-            let t0 = Utc.ymd(2020, 1, 22).and_hms(0, 0, 0);
 
             cc.draw_series(LineSeries::new(
-                country.evolution.iter().enumerate().skip(1).map(|(index, point)| {
-                    let prev_point = &country.evolution[index-1];
-                    (
-                        point.update_time.signed_duration_since(t0).num_hours() as f32,
-                        (point.deaths  - prev_point.deaths) as f32,
-                    )
+                country.records.iter().enumerate().skip(average_days).map(|(index,record)| {
+                    (record.day as f32, 
+                    averaged_daily_deaths(&country.records, index, average_days))
                 }),
-                &GraphPalette::pick(index),
-            ))?
-                .label(country.name.clone())
+                &GraphPalette::pick(index)))?
+                .label(country.country_name.clone())
                 .legend(move |(x, y)| {
                     PathElement::new(vec![(x, y), (x + 20, y)], &GraphPalette::pick(index))
                 });
@@ -279,28 +209,28 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
 
     // Draw deaths per 100K people graph
     {
-        let mut cc = setup_chart!("Deaths per 100K", bottom_left, 80.0);
+        let mut cc = setup_chart!("Deaths per 100K", bottom_left, 90.0);
 
         for (index, country) in regions
             .iter()
-            .filter(|x| countries.contains(&x.name))
+            .filter(|x| countries.contains(&x.country_name.as_str()))
             .enumerate()
         {
-            let t0 = Utc.ymd(2020, 1, 22).and_hms(0, 0, 0);
 
-            let population_over100k = population_map.get(&country.name).cloned().unwrap() as f32 /
-                100_000 as f32;
+            let population_over100k = country.population_2018 as f32 / 100_000 as f32;
 
-            cc.draw_series(LineSeries::new(
-                country.evolution.iter().map(|point| {
-                    (
-                        point.update_time.signed_duration_since(t0).num_hours() as f32,
-                        point.deaths as f32 / population_over100k,
-                    )
-                }),
-                &GraphPalette::pick(index),
-            ))?
-                .label(country.name.clone())
+            let accum_deaths = {
+                let mut running_sum = 0;
+                let mut deaths = vec!();
+                for record in country.records.iter().rev() {
+                    running_sum += record.deaths;
+                    deaths.push( (record.day as f32, running_sum as f32 / population_over100k) );
+                }
+                deaths
+            };
+
+            cc.draw_series(LineSeries::new( accum_deaths, &GraphPalette::pick(index)))?
+                .label(country.country_name.clone())
                 .legend(move |(x, y)| {
                     PathElement::new(vec![(x, y), (x + 20, y)], &GraphPalette::pick(index))
                 });
@@ -309,38 +239,30 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
             .position(plotters::chart::SeriesLabelPosition::UpperLeft)
             .border_style(&BLACK).draw()?;
     }
-
+    
     {
-        let mut cc = setup_chart!("Averaged (3 day) Daily Deaths per 100K", bottom_right, 7.0);
+        let mut cc = setup_chart!(format!("Daily Deaths per 100K, Averaged over {} days", average_days), bottom_right, 4.0);
 
         for (index, country) in regions
             .iter()
-            .filter(|x| countries.contains(&x.name))
+            .filter(|x| countries.contains(&x.country_name.as_str()))
             .enumerate()
         {
-            let t0 = Utc.ymd(2020, 1, 22).and_hms(0, 0, 0);
             
-            let population_over100k = population_map.get(&country.name).cloned().unwrap() as f32 /
-                100_000 as f32;
+            let population_over100k = country.population_2018 as f32 / 100_000 as f32;
 
             cc.draw_series(LineSeries::new(
-                country.evolution.iter().enumerate().skip(3).map(|(index, point)| {
-                    let prev_1_point = &country.evolution[index-1];
-                    let prev_2_point = &country.evolution[index-2];
-                    let prev_3_point = &country.evolution[index-3];
-
-                    let count = point.deaths - prev_1_point.deaths;
-                    let prev_1_count = prev_1_point.deaths - prev_2_point.deaths;
-                    let prev_2_count = prev_2_point.deaths - prev_3_point.deaths;
+                country.records.iter().enumerate().skip(average_days).map(|(index, point)| {
 
                     (
-                        point.update_time.signed_duration_since(t0).num_hours() as f32,
-                        ((count + prev_1_count + prev_2_count) / 3) as f32 / population_over100k,
+                        point.day as f32,
+                        averaged_daily_deaths(&country.records, index, average_days) / population_over100k,
+                        //point.deaths as f32 / population_over100k,
                     )
                 }),
                 &GraphPalette::pick(index),
             ))?
-                .label(country.name.clone())
+                .label(country.country_name.clone())
                 .legend(move |(x, y)| {
                     PathElement::new(vec![(x, y), (x + 20, y)], &GraphPalette::pick(index))
                 });
@@ -356,9 +278,9 @@ fn draw_evolution_graph(regions: &Vec<RegionData>) -> Result<()> {
 
 
 fn main() -> Result<()> {
-    let country_data = get_per_country_data()?;
+    let countries = get_covid_data_json()?;
 
-    draw_evolution_graph(&country_data)?;
+    draw_evolution_graph(&countries)?;
 
     Ok(())
 }
