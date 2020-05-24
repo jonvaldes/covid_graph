@@ -1,4 +1,3 @@
-// TODO - Check this data source: https://opendata.ecdc.europa.eu/covid19/casedistribution/json/
 use std::collections::HashMap;
 
 use serde::Deserialize;
